@@ -99,11 +99,11 @@ services:
       # Exposed on host for local network testing; cloudflared targets http://frontend:80
       - "${FRONTEND_PORT:-8080}:80"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ || exit 1"]
+      test: ["CMD-SHELL", "curl -fs http://localhost/ || exit 1"]
       interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 30s
 
   # ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
   cloudflared:
@@ -112,8 +112,7 @@ services:
     networks:
       - lms-net
     depends_on:
-      frontend:
-        condition: service_healthy
+      - frontend
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN}
