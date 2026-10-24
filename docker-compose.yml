@@ -1,0 +1,119 @@
+# ─── Docker Compose — LMS Full Stack ──────────────────────────────────────────
+# Services: postgres · backend · frontend (nginx) · cloudflared
+# All containers on a private bridge network; only frontend:8080 is exposed on host.
+
+name: lms
+
+networks:
+  lms-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      - lms-net
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # No ports — not exposed to host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Backend (Node.js / Express) ──────────────────────────────────────────────
+  backend:
+    build:
+      context: ./lp_be
+      dockerfile: Dockerfile
+    image: lms-backend:latest
+    restart: unless-stopped
+    networks:
+      - lms-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Build DATABASE_URL from postgres service — host is "postgres" (service name)
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET:         ${JWT_SECRET}
+      JWT_EXPIRES_IN:     ${JWT_EXPIRES_IN:-1d}
+      # CORS whitelist — backend is proxied so this just needs to list the nginx host
+      FRONTEND_URL:       ${FRONTEND_URL}
+      # Cloudflare R2
+      R2_ACCOUNT_ID:      ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID:   ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET_NAME:     ${R2_BUCKET_NAME}
+      R2_PUBLIC_URL:      ${R2_PUBLIC_URL}
+      # External APIs
+      JUDGE0_BASE_URL:    ${JUDGE0_BASE_URL:-https://judge0-ce.p.rapidapi.com}
+      JUDGE0_API_KEY:     ${JUDGE0_API_KEY:-}
+      GEMINI_API_KEY:     ${GEMINI_API_KEY}
+      # Email
+      BREVO_API_KEY:      ${BREVO_API_KEY}
+      BREVO_SENDER_EMAIL: ${BREVO_SENDER_EMAIL}
+      RESEND_API_KEY:     ${RESEND_API_KEY:-}
+      SMTP_HOST:          ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT:          ${SMTP_PORT:-587}
+      SMTP_USER:          ${SMTP_USER:-}
+      SMTP_PASSWORD:      ${SMTP_PASSWORD:-}
+    # Backend port NOT published to host — only reachable via nginx proxy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Frontend (Vite build → Nginx) ────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./lp_fe
+      dockerfile: Dockerfile
+      args:
+        # Relative path — works behind any domain without rebuilding
+        VITE_API_BASE_URL: /api
+    image: lms-frontend:latest
+    restart: unless-stopped
+    networks:
+      - lms-net
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # Exposed on host for local network testing; cloudflared targets http://frontend:80
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    networks:
+      - lms-net
+    depends_on:
+      frontend:
+        condition: service_healthy
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
